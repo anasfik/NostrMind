@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+data/
+log.txt
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+guide.md
+CLI*.md
+*.sh
