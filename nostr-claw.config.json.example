@@ -1,7 +1,7 @@
 {
   "nodeEnv": "development",
   "logLevel": "info",
-  "logFilePath": "./log.txt",
+  "logFilePath": "./data/log.txt",
   "dbPath": "./data/nostr-claw.sqlite",
   "nostrRelays": [
     "wss://relay.damus.io",
@@ -17,8 +17,7 @@
     }
   },
   "notifications": {
-    "recipientNpub": "npub1replacewithrecipient",
-    "senderNsec": "nsec1optionalcustomsenderkey"
+    "recipientNpub": "npub1replacewithrecipient"
   },
   "watchlists": [
     {

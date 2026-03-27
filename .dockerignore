@@ -4,6 +4,15 @@ dist
 .gitignore
 npm-debug.log
 .env
+data/
+log.txt
+*.log
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.sh
+verify-dm.js
+scripts/
+guide.md
+CLI_GUIDE.md
+nostr-claw.config.json

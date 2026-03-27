@@ -11,3 +11,5 @@ guide.md
 CLI*.md
 *.sh
 nostr-claw.config.json
+verify-dm.js
+scripts/

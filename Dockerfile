@@ -20,7 +20,7 @@ RUN npm install --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/nostr-claw.config.json.example ./nostr-claw.config.json.example
 
-RUN mkdir -p /data
-VOLUME ["/data"]
+RUN mkdir -p /app/data
+VOLUME ["/app/data"]
 
 CMD ["node", "dist/index.js"]
