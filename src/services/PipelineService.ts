@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { appendFile } from "node:fs/promises";
-import type { FastifyBaseLogger } from "fastify";
 import type {
   AiProvider,
   NotificationSender,
@@ -12,6 +11,7 @@ import {
   ProcessingRepository,
   WatchlistRepository,
 } from "../infra/repositories";
+import type { AppLogger } from "../logger";
 import type { Watchlist } from "../types";
 import { AiQueue } from "./AiQueue";
 
@@ -28,7 +28,7 @@ export class PipelineService {
       aiProvider: AiProvider;
       aiQueue: AiQueue;
       notificationSender?: NotificationSender;
-      logger: FastifyBaseLogger;
+      logger: AppLogger;
       logFilePath: string;
       watchlistRefreshMs: number;
     },
@@ -47,7 +47,6 @@ export class PipelineService {
     aiDecision: { notify: boolean; message?: string; match_score?: number };
   }): Promise<void> {
     const line = JSON.stringify({
-      timestamp: new Date().toISOString(),
       watchlistId: input.watchlist.id,
       watchlistName: input.watchlist.name,
       eventId: input.event.id,
@@ -64,17 +63,27 @@ export class PipelineService {
   }
 
   start(): void {
+    this.deps.logger.info("pipeline:start");
     this.refreshWatchlistsAndSubscriptions();
     this.unbindRelay = this.deps.relayConnector.onEvent((event) => {
       void this.handleEvent(event);
     });
 
-    this.refreshTimer = setInterval(() => {
-      this.refreshWatchlistsAndSubscriptions();
-    }, this.deps.watchlistRefreshMs);
+    if (this.deps.watchlistRefreshMs > 0) {
+      this.deps.logger.info(
+        { refreshIntervalMs: this.deps.watchlistRefreshMs },
+        "pipeline:watchlist-refresh:enabled",
+      );
+      this.refreshTimer = setInterval(() => {
+        this.refreshWatchlistsAndSubscriptions();
+      }, this.deps.watchlistRefreshMs);
+    } else {
+      this.deps.logger.info("pipeline:watchlist-refresh:disabled");
+    }
   }
 
   stop(): void {
+    this.deps.logger.info("pipeline:stop");
     if (this.unbindRelay) {
       this.unbindRelay();
       this.unbindRelay = undefined;
@@ -89,13 +98,29 @@ export class PipelineService {
   refreshWatchlistsAndSubscriptions(): void {
     this.watchlists = this.deps.watchlistRepo.listActive();
     const filters = this.toRelayFilters(this.watchlists);
+
+    this.deps.logger.info(
+      {
+        activeWatchlistCount: this.watchlists.length,
+        filtersCount: filters.length,
+      },
+      "pipeline:subscriptions:refresh",
+    );
+
+    this.deps.logger.debug(
+      {
+        filters,
+      },
+      "pipeline:subscriptions:filters",
+    );
+
     this.deps.relayConnector.stop();
     this.deps.relayConnector.start(filters);
   }
 
   private toRelayFilters(watchlists: Watchlist[]): RelayFilter[] {
     if (watchlists.length === 0) {
-      return [{ kinds: [1], limit: 1 }];
+      return [{ kinds: [1] }];
     }
 
     return watchlists.map((watchlist) => {
@@ -104,6 +129,10 @@ export class PipelineService {
       // Include since timestamp from watchlist creation
       if (watchlist.filters.since !== undefined) {
         filter.since = watchlist.filters.since;
+      }
+
+      if (watchlist.filters.limit !== undefined) {
+        filter.limit = watchlist.filters.limit;
       }
 
       if (watchlist.filters.kinds?.length) {
@@ -131,7 +160,6 @@ export class PipelineService {
         filter.kinds = [1];
       }
 
-      filter.limit = 1;
       return filter;
     });
   }
@@ -144,6 +172,15 @@ export class PipelineService {
     kind: number;
     tags: string[][];
   }): Promise<void> {
+    this.deps.logger.debug(
+      {
+        eventId: event.id,
+        kind: event.kind,
+        pubkey: event.pubkey,
+      },
+      "pipeline:event:received",
+    );
+
     for (const watchlist of this.watchlists) {
       try {
         const isProcessed = this.deps.processingRepo.hasProcessed(
@@ -151,12 +188,45 @@ export class PipelineService {
           watchlist.id,
         );
 
-        if (!matchesQuickFilter(event, watchlist.filters, { isProcessed })) {
+        const quickMatch = matchesQuickFilter(event, watchlist.filters, {
+          isProcessed,
+        });
+
+        if (!quickMatch) {
+          this.deps.logger.debug(
+            {
+              eventId: event.id,
+              watchlistId: watchlist.id,
+              reason: isProcessed
+                ? "already_processed"
+                : "quick_filter_no_match",
+            },
+            "pipeline:event:skipped",
+          );
           continue;
         }
 
+        this.deps.logger.info(
+          {
+            eventId: event.id,
+            watchlistId: watchlist.id,
+            watchlistName: watchlist.name,
+          },
+          "pipeline:event:processing",
+        );
+
         const aiDecision = await this.deps.aiQueue.enqueue(() =>
           this.deps.aiProvider.evaluate({ watchlist, event }),
+        );
+
+        this.deps.logger.info(
+          {
+            eventId: event.id,
+            watchlistId: watchlist.id,
+            notify: aiDecision.notify,
+            matchScore: aiDecision.match_score ?? null,
+          },
+          "pipeline:event:processed",
         );
 
         const hash = crypto
@@ -171,13 +241,39 @@ export class PipelineService {
           aiDecision,
         });
 
+        this.deps.logger.debug(
+          {
+            eventId: event.id,
+            watchlistId: watchlist.id,
+          },
+          "pipeline:event:saved",
+        );
+
         await this.appendProcessingLog({
           watchlist,
           event,
           aiDecision,
         });
 
+        this.deps.logger.debug(
+          {
+            eventId: event.id,
+            watchlistId: watchlist.id,
+          },
+          "pipeline:event:log-written",
+        );
+
         if (aiDecision.notify) {
+          this.deps.logger.info(
+            {
+              eventId: event.id,
+              watchlistId: watchlist.id,
+              message: aiDecision.message ?? null,
+              matchScore: aiDecision.match_score ?? null,
+            },
+            "pipeline:match:found",
+          );
+
           this.deps.processingRepo.addInsight({
             watchlistId: watchlist.id,
             eventId: event.id,
@@ -187,16 +283,41 @@ export class PipelineService {
             aiDecision,
           });
 
+          this.deps.logger.debug(
+            {
+              eventId: event.id,
+              watchlistId: watchlist.id,
+            },
+            "pipeline:match:insight-saved",
+          );
+
           await this.deps.notificationSender?.sendMatchNotification({
             watchlist,
             event,
             aiDecision,
           });
+
+          this.deps.logger.info(
+            {
+              eventId: event.id,
+              watchlistId: watchlist.id,
+              notificationsEnabled: Boolean(this.deps.notificationSender),
+            },
+            "pipeline:match:notified",
+          );
+        } else {
+          this.deps.logger.debug(
+            {
+              eventId: event.id,
+              watchlistId: watchlist.id,
+            },
+            "pipeline:event:no-match",
+          );
         }
       } catch (error) {
         this.deps.logger.error(
           { error, eventId: event.id, watchlistId: watchlist.id },
-          "event processing failed",
+          "pipeline:event:failed",
         );
       }
     }

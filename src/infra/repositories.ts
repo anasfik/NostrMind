@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import type {
   AiDecision,
+  ConfigWatchlist,
   InsightRecord,
   Watchlist,
   WatchlistFilter,
@@ -33,6 +34,38 @@ function parseWatchlistRow(row: any): Watchlist {
 export class WatchlistRepository {
   constructor(private readonly db: Database.Database) {}
 
+  private upsert(input: {
+    id: string;
+    name: string;
+    prompt: string;
+    filters: WatchlistFilter;
+    active: boolean;
+  }): void {
+    const existing = this.getById(input.id);
+    const now = nowIso();
+
+    this.db
+      .prepare(
+        `INSERT INTO watchlists (id, name, prompt, filters_json, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           prompt = excluded.prompt,
+           filters_json = excluded.filters_json,
+           active = excluded.active,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.id,
+        input.name,
+        input.prompt,
+        JSON.stringify(input.filters),
+        input.active ? 1 : 0,
+        existing?.createdAt ?? now,
+        now,
+      );
+  }
+
   list(): Watchlist[] {
     const rows = this.db
       .prepare("SELECT * FROM watchlists ORDER BY created_at DESC")
@@ -57,13 +90,6 @@ export class WatchlistRepository {
   }): Watchlist {
     const id = crypto.randomUUID();
     const now = nowIso();
-    const nowUnix = Math.floor(Date.now() / 1000); // Unix timestamp in seconds
-
-    // Auto-set since to current time if not provided
-    const filters = {
-      ...input.filters,
-      since: input.filters.since ?? nowUnix,
-    };
 
     this.db
       .prepare(
@@ -74,7 +100,7 @@ export class WatchlistRepository {
         id,
         input.name,
         input.prompt,
-        JSON.stringify(filters),
+        JSON.stringify(input.filters),
         input.active === false ? 0 : 1,
         now,
         now,
@@ -96,6 +122,34 @@ export class WatchlistRepository {
       .prepare("UPDATE watchlists SET active = ?, updated_at = ? WHERE id = ?")
       .run(active ? 1 : 0, now, id);
     return this.getById(id);
+  }
+
+  syncFromConfig(watchlists: ConfigWatchlist[]): Watchlist[] {
+    const now = nowIso();
+
+    const sync = this.db.transaction((items: ConfigWatchlist[]) => {
+      for (const watchlist of items) {
+        this.upsert(watchlist);
+      }
+
+      if (items.length === 0) {
+        this.db
+          .prepare("UPDATE watchlists SET active = 0, updated_at = ?")
+          .run(now);
+        return;
+      }
+
+      const placeholders = items.map(() => "?").join(", ");
+      this.db
+        .prepare(
+          `UPDATE watchlists SET active = 0, updated_at = ?
+           WHERE id NOT IN (${placeholders})`,
+        )
+        .run(now, ...items.map((item) => item.id));
+    });
+
+    sync(watchlists);
+    return this.list();
   }
 }
 
@@ -248,6 +302,31 @@ export class ProcessingRepository {
 export class AppIdentityRepository {
   constructor(private readonly db: Database.Database) {}
 
+  private decodeSecretKey(input: string): Uint8Array {
+    const trimmed = input.trim();
+    if (trimmed.startsWith("nsec1")) {
+      const decoded = nip19.decode(trimmed);
+      if (decoded.type !== "nsec") {
+        throw new Error("notifier sender key must be a valid nsec");
+      }
+
+      return decoded.data;
+    }
+
+    if (!/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+      throw new Error(
+        "notifier sender key must be a valid nsec or 64-char hex key",
+      );
+    }
+
+    const bytes = new Uint8Array(32);
+    for (let index = 0; index < 32; index += 1) {
+      bytes[index] = parseInt(trimmed.slice(index * 2, index * 2 + 2), 16);
+    }
+
+    return bytes;
+  }
+
   get(key: string): string | null {
     const row = this.db
       .prepare("SELECT value FROM app_settings WHERE key = ?")
@@ -264,6 +343,23 @@ export class AppIdentityRepository {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(key, value, now, now);
+  }
+
+  setNotifierIdentity(senderNsec: string): NostrIdentity {
+    const secretKey = this.decodeSecretKey(senderNsec);
+    const nsec = nip19.nsecEncode(secretKey);
+    const pubkey = getPublicKey(secretKey);
+    const npub = nip19.npubEncode(pubkey);
+
+    this.set("notifier_nsec", nsec);
+    this.set("notifier_npub", npub);
+    this.set("notifier_pubkey", pubkey);
+
+    return {
+      nsec,
+      npub,
+      pubkey,
+    };
   }
 
   getOrCreateNotifierIdentity(): NostrIdentity {

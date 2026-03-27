@@ -1,0 +1,52 @@
+{
+  "nodeEnv": "development",
+  "logLevel": "info",
+  "logFilePath": "./log.txt",
+  "dbPath": "./data/nostr-claw.sqlite",
+  "nostrRelays": [
+    "wss://relay.damus.io",
+    "wss://relay.primal.net",
+    "wss://nos.lol"
+  ],
+  "ai": {
+    "provider": "openai",
+    "rpm": 20,
+    "openai": {
+      "apiKey": "replace-with-openai-key",
+      "model": "gpt-4.1-mini"
+    }
+  },
+  "notifications": {
+    "recipientNpub": "npub1replacewithrecipient",
+    "senderNsec": "nsec1optionalcustomsenderkey"
+  },
+  "watchlists": [
+    {
+      "id": "bitcoin-l2",
+      "name": "Bitcoin L2 Discussions",
+      "prompt": "Alert me about significant discussions around Bitcoin L2s and tell me why they matter.",
+      "active": true,
+      "filters": {
+        "keywords": ["bitcoin", "btc", "l2", "lightning", "ark"],
+        "kinds": [1],
+        "since": 1735689600,
+        "limit": 50,
+        "tags": {
+          "t": ["bitcoin", "lightning"]
+        }
+      }
+    },
+    {
+      "id": "openclaw-mentions",
+      "name": "OpenClaw Mentions",
+      "prompt": "Notify me about strong mentions of OpenClaw, Nostr-Claw, or related tooling.",
+      "active": true,
+      "filters": {
+        "keywords": ["openclaw", "nostr-claw", "nostr claw"],
+        "kinds": [1],
+        "since": 1735689600,
+        "limit": 50
+      }
+    }
+  ]
+}

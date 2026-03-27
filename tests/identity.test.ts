@@ -15,4 +15,17 @@ describe("AppIdentityRepository", () => {
     expect(first.pubkey).toHaveLength(64);
     expect(second).toEqual(first);
   });
+
+  it("accepts a configured notifier sender key", () => {
+    const db = initDb(":memory:");
+    const repo = new AppIdentityRepository(db);
+
+    const identity = repo.setNotifierIdentity(
+      "1111111111111111111111111111111111111111111111111111111111111111",
+    );
+
+    expect(identity.nsec.startsWith("nsec1")).toBe(true);
+    expect(identity.npub.startsWith("npub1")).toBe(true);
+    expect(repo.getOrCreateNotifierIdentity()).toEqual(identity);
+  });
 });

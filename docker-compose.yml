@@ -3,10 +3,7 @@ services:
   nostr-claw:
     build: .
     container_name: nostr-claw
-    ports:
-      - "8080:8080"
-    env_file:
-      - .env
     volumes:
       - ./data:/data
+      - ./nostr-claw.config.json:/app/nostr-claw.config.json:ro
     restart: unless-stopped

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type { RelayConnector, RelayFilter } from "../../contracts";
+import type { AppLogger } from "../../logger";
 import type { NostrEvent } from "../../types";
 
 type NostrMessage = [string, ...unknown[]];
@@ -16,6 +17,7 @@ export class NostrWsRelayConnector implements RelayConnector {
   constructor(
     private readonly relays: string[],
     private readonly reconnectMs = 5000,
+    private readonly logger?: AppLogger,
   ) {}
 
   onEvent(handler: (event: NostrEvent) => void): () => void {
@@ -28,6 +30,15 @@ export class NostrWsRelayConnector implements RelayConnector {
     this.subscriptionId = `nostr-claw-${crypto.randomUUID()}`;
     this.stopped = false;
 
+    this.logger?.info(
+      {
+        relayCount: this.relays.length,
+        subscriptionId: this.subscriptionId,
+        filterCount: this.filters.length,
+      },
+      "starting relay connector",
+    );
+
     for (const relay of this.relays) {
       this.connectRelay(relay);
     }
@@ -35,6 +46,11 @@ export class NostrWsRelayConnector implements RelayConnector {
 
   stop(): void {
     this.stopped = true;
+    this.logger?.info(
+      { openSockets: this.sockets.size },
+      "stopping relay connector",
+    );
+
     for (const socket of this.sockets.values()) {
       try {
         socket.close();
@@ -48,12 +64,18 @@ export class NostrWsRelayConnector implements RelayConnector {
   private connectRelay(relay: string): void {
     if (this.stopped || this.sockets.has(relay)) return;
 
+    this.logger?.debug({ relay }, "connecting to relay");
+
     const ws = new WebSocket(relay);
     this.sockets.set(relay, ws);
 
     ws.on("open", () => {
       const req = ["REQ", this.subscriptionId, ...this.filters];
       ws.send(JSON.stringify(req));
+      this.logger?.info(
+        { relay, subscriptionId: this.subscriptionId },
+        "relay connected and subscription sent",
+      );
     });
 
     ws.on("message", (data) => {
@@ -62,21 +84,37 @@ export class NostrWsRelayConnector implements RelayConnector {
         if (parsed[0] !== "EVENT") return;
         const event = parsed[2] as NostrEvent;
         if (event?.id) {
+          this.logger?.debug(
+            {
+              relay,
+              eventId: event.id,
+              kind: event.kind,
+              pubkey: event.pubkey,
+            },
+            "relay event received",
+          );
           this.emitter.emit("event", event);
         }
       } catch {
         // ignore invalid messages
+        this.logger?.warn({ relay }, "received invalid relay message payload");
       }
     });
 
     ws.on("close", () => {
       this.sockets.delete(relay);
+      this.logger?.warn({ relay }, "relay connection closed");
       if (!this.stopped) {
+        this.logger?.info(
+          { relay, reconnectMs: this.reconnectMs },
+          "scheduling relay reconnect",
+        );
         setTimeout(() => this.connectRelay(relay), this.reconnectMs);
       }
     });
 
-    ws.on("error", () => {
+    ws.on("error", (error) => {
+      this.logger?.error({ relay, error }, "relay socket error");
       try {
         ws.close();
       } catch {

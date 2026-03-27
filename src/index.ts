@@ -1,7 +1,5 @@
-import "dotenv/config";
 import { getConfig } from "./config";
 import type { AiProvider } from "./contracts";
-import { createApp } from "./app";
 import { OpenAiProvider } from "./infra/ai/OpenAiProvider";
 import { OpenRouterProvider } from "./infra/ai/OpenRouterProvider";
 import { initDb } from "./infra/db";
@@ -12,15 +10,23 @@ import {
   WatchlistRepository,
 } from "./infra/repositories";
 import { NostrWsRelayConnector } from "./infra/relay/NostrWsRelayConnector";
+import { createLogger } from "./logger";
 import { AiQueue } from "./services/AiQueue";
 import { PipelineService } from "./services/PipelineService";
 
 async function main(): Promise<void> {
   const config = getConfig();
+  const logger = createLogger(config.logLevel);
   const db = initDb(config.dbPath);
   const watchlistRepo = new WatchlistRepository(db);
   const processingRepo = new ProcessingRepository(db);
   const identityRepo = new AppIdentityRepository(db);
+
+  if (config.notifierSenderNsec) {
+    identityRepo.setNotifierIdentity(config.notifierSenderNsec);
+  }
+
+  const syncedWatchlists = watchlistRepo.syncFromConfig(config.watchlists);
 
   let aiProvider: AiProvider;
   if (config.aiProvider === "openai") {
@@ -42,28 +48,10 @@ async function main(): Promise<void> {
     throw new Error(`Unsupported AI_PROVIDER: ${config.aiProvider}`);
   }
 
-  const relayConnector = new NostrWsRelayConnector(config.nostrRelays);
-
-  let pipeline: PipelineService | undefined;
-
-  const app = createApp(
-    {
-      watchlistRepo,
-      processingRepo,
-      onWatchlistsChanged: () => pipeline?.refreshWatchlistsAndSubscriptions(),
-    },
-    {
-      logger:
-        config.nodeEnv === "development"
-          ? {
-              level: config.logLevel,
-              transport: {
-                target: "pino-pretty",
-                options: { colorize: true },
-              },
-            }
-          : { level: config.logLevel },
-    },
+  const relayConnector = new NostrWsRelayConnector(
+    config.nostrRelays,
+    5000,
+    logger,
   );
 
   const notificationSender = config.notifyRecipientNpub
@@ -71,20 +59,20 @@ async function main(): Promise<void> {
         relays: config.nostrRelays,
         recipientNpub: config.notifyRecipientNpub,
         identityRepo,
-        logger: app.log,
+        logger,
       })
     : undefined;
 
   await notificationSender?.initialize?.();
 
   const aiQueue = new AiQueue(config.aiRpm, (waitMs) =>
-    app.log.warn(
+    logger.warn(
       { waitMs, pending: aiQueue.pending },
       "AI rate limit reached, throttling next request",
     ),
   );
 
-  pipeline = new PipelineService({
+  const pipeline = new PipelineService({
     relayConnector,
     watchlistRepo,
     processingRepo,
@@ -93,17 +81,59 @@ async function main(): Promise<void> {
     notificationSender,
     logFilePath: config.logFilePath,
     watchlistRefreshMs: config.watchlistRefreshMs,
-    logger: app.log,
+    logger,
   });
 
   pipeline.start();
 
-  app.addHook("onClose", async () => {
-    pipeline?.stop();
-    db.close();
-  });
+  logger.info(
+    {
+      configPath: config.configPath,
+      dbPath: config.dbPath,
+      relayCount: config.nostrRelays.length,
+      watchlistCount: syncedWatchlists.filter((watchlist) => watchlist.active)
+        .length,
+      notifyRecipientNpub: config.notifyRecipientNpub ?? null,
+    },
+    "nostr-claw started in config-file mode",
+  );
 
-  await app.listen({ host: config.host, port: config.port });
+  logger.debug(
+    {
+      aiProvider: config.aiProvider,
+      aiModel:
+        config.aiProvider === "openrouter"
+          ? config.openRouterModel
+          : config.openAiModel,
+      aiRpm: config.aiRpm,
+      watchlists: syncedWatchlists.map((watchlist) => ({
+        id: watchlist.id,
+        name: watchlist.name,
+        active: watchlist.active,
+        since: watchlist.filters.since,
+        limit: watchlist.filters.limit,
+      })),
+    },
+    "runtime configuration snapshot",
+  );
+
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
+    logger.info("shutting down nostr-claw");
+    pipeline.stop();
+    db.close();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  await new Promise<void>(() => undefined);
 }
 
 main().catch((err: unknown) => {

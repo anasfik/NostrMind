@@ -15,7 +15,8 @@ export interface WatchlistFilter {
   authors?: string[];
   kinds?: number[];
   tags?: Record<string, string[]>;
-  since?: number; // Unix timestamp (seconds) - set to watchlist creation time
+  since?: number; // Unix timestamp (seconds)
+  limit?: number; // Relay subscription limit
 }
 
 export interface Watchlist {
@@ -26,6 +27,14 @@ export interface Watchlist {
   active: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ConfigWatchlist {
+  id: string;
+  name: string;
+  prompt: string;
+  filters: WatchlistFilter;
+  active: boolean;
 }
 
 export interface AiDecision {

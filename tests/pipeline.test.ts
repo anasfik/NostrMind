@@ -68,7 +68,12 @@ describe("PipelineService notifications", () => {
       notificationSender,
       logFilePath: "/tmp/nostr-claw-pipeline.test.log",
       watchlistRefreshMs: 1000,
-      logger: { error: vi.fn() } as any,
+      logger: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      } as any,
     });
 
     pipeline.refreshWatchlistsAndSubscriptions();

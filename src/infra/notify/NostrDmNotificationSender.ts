@@ -10,39 +10,56 @@ if (typeof globalThis.WebSocket === "undefined") {
 function formatNotificationMessage(
   input: Parameters<NotificationSender["sendMatchNotification"]>[0],
 ): string {
-  const parts = [
-    `Nostr-Claw match for \"${input.watchlist.name}\"`,
-    "",
-    input.aiDecision.message ?? "A matching event was found.",
-    "",
-    `Event: https://njump.me/${input.event.id}`,
-    `Author: https://njump.me/${input.event.pubkey}`,
+  const nevent = nip19.neventEncode({ id: input.event.id });
+  const eventLink = `https://njump.me/${nevent}`;
+  const contentPreview = input.event.content
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220);
+
+  const nextSteps = input.aiDecision.recommended_actions?.length
+    ? input.aiDecision.recommended_actions
+        .map((action, index) => `${index + 1}. ${action}`)
+        .join("\n")
+    : "-";
+
+  const sections = [
+    `Nostr-Claw Match\nWatchlist: ${input.watchlist.name}`,
+    `Summary\n${input.aiDecision.message ?? "Relevant event found."}`,
+    `Details\nScore: ${input.aiDecision.match_score ?? "n/a"}\nEvent: ${eventLink}\nAuthor: https://njump.me/${input.event.pubkey}`,
     input.aiDecision.actionable_link
-      ? `Actionable link: ${input.aiDecision.actionable_link}`
+      ? `Action\n${input.aiDecision.actionable_link}`
       : undefined,
-    input.aiDecision.match_score !== undefined
-      ? `Match score: ${input.aiDecision.match_score}`
-      : undefined,
-    input.aiDecision.recommended_actions?.length
-      ? `Recommended actions: ${input.aiDecision.recommended_actions.join(" | ")}`
-      : undefined,
-    "",
-    `Prompt: ${input.watchlist.prompt}`,
-    `Content: ${input.event.content}`,
+    `Next Steps\n${nextSteps}`,
+    contentPreview ? `Preview\n${contentPreview}` : undefined,
   ];
 
-  return parts.filter(Boolean).join("\n");
+  return sections.filter(Boolean).join("\n\n");
 }
 
 type LoggerLike = {
+  debug?: (...args: unknown[]) => void;
   info: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
+  warn?: (...args: unknown[]) => void;
 };
 
 const RELAY_EVENT_TAGS = new Set(["relay", "r"]);
+const DISCOVERY_RELAYS = [
+  "wss://relay.damus.io",
+  "wss://purplepag.es",
+  "wss://relay.primal.net",
+  "wss://nos.lol",
+];
+const RECIPIENT_DM_RELAY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+const recipientDmRelayCache = new Map<
+  string,
+  { relays: string[]; fetchedAt: number }
+>();
 
 function normalizeRelayUrl(value: string | undefined): string | undefined {
-  const relay = value?.trim();
+  const relay = value?.trim().replace(/\/+$/, "");
   if (!relay) {
     return undefined;
   }
@@ -50,6 +67,28 @@ function normalizeRelayUrl(value: string | undefined): string | undefined {
   return relay.startsWith("wss://") || relay.startsWith("ws://")
     ? relay
     : undefined;
+}
+
+function dedupeRelays(relays: string[]): string[] {
+  const seen = new Set<string>();
+  const uniqueRelays: string[] = [];
+
+  for (const relay of relays) {
+    const normalizedRelay = normalizeRelayUrl(relay);
+    if (!normalizedRelay) {
+      continue;
+    }
+
+    const relayKey = normalizedRelay.toLowerCase();
+    if (seen.has(relayKey)) {
+      continue;
+    }
+
+    seen.add(relayKey);
+    uniqueRelays.push(normalizedRelay);
+  }
+
+  return uniqueRelays;
 }
 
 export class NostrDmNotificationSender implements NotificationSender {
@@ -75,9 +114,25 @@ export class NostrDmNotificationSender implements NotificationSender {
   }
 
   private async getRecipientDmRelays(): Promise<string[]> {
+    const cached = recipientDmRelayCache.get(this.recipientPubkey);
+    if (
+      cached &&
+      Date.now() - cached.fetchedAt < RECIPIENT_DM_RELAY_CACHE_TTL_MS
+    ) {
+      this.deps.logger.debug?.(
+        {
+          recipient: this.recipientPubkey,
+          relayCount: cached.relays.length,
+          cacheAgeMs: Date.now() - cached.fetchedAt,
+        },
+        "using cached recipient DM relays",
+      );
+      return cached.relays;
+    }
+
     try {
-      const relayListEvent = await this.pool.get(
-        this.deps.relays,
+      const relayListEvents = await this.pool.querySync(
+        dedupeRelays([...this.deps.relays, ...DISCOVERY_RELAYS]),
         {
           authors: [this.recipientPubkey],
           kinds: [10050],
@@ -86,16 +141,36 @@ export class NostrDmNotificationSender implements NotificationSender {
         { maxWait: 2000 },
       );
 
-      if (!relayListEvent) {
+      if (!relayListEvents.length) {
         return [];
       }
 
-      const relays = relayListEvent.tags
-        .filter((tag) => RELAY_EVENT_TAGS.has(tag[0]))
-        .map((tag) => normalizeRelayUrl(tag[1]))
-        .filter((relay): relay is string => Boolean(relay));
+      const relayListEvent = relayListEvents.sort(
+        (left, right) => right.created_at - left.created_at,
+      )[0];
 
-      return [...new Set(relays)];
+      const relays = dedupeRelays(
+        relayListEvent.tags
+          .filter((tag) => RELAY_EVENT_TAGS.has(tag[0]))
+          .map((tag) => normalizeRelayUrl(tag[1]))
+          .filter((relay): relay is string => Boolean(relay)),
+      );
+
+      recipientDmRelayCache.set(this.recipientPubkey, {
+        relays,
+        fetchedAt: Date.now(),
+      });
+
+      this.deps.logger.info(
+        {
+          recipient: this.recipientPubkey,
+          relayCount: relays.length,
+          relays,
+        },
+        "resolved recipient DM relays",
+      );
+
+      return relays;
     } catch (error) {
       this.deps.logger.error(
         { error, recipient: this.recipientPubkey },
@@ -113,9 +188,16 @@ export class NostrDmNotificationSender implements NotificationSender {
     failedRelayCount: number;
     failedRelays: Array<{ relay: string; reason: string }>;
   }> {
-    const uniqueRelays = [
-      ...new Set(relays.map((relay) => relay.trim()).filter(Boolean)),
-    ];
+    const uniqueRelays = dedupeRelays(relays);
+
+    if (uniqueRelays.length === 0) {
+      return {
+        successfulRelays: [],
+        failedRelayCount: 0,
+        failedRelays: [],
+      };
+    }
+
     const publishResults = await Promise.allSettled(
       this.pool.publish(uniqueRelays, event),
     );
@@ -160,6 +242,14 @@ export class NostrDmNotificationSender implements NotificationSender {
 
     this.senderSecretKey = decodedNsec.data;
     this.senderPubkey = identity.pubkey;
+
+    this.deps.logger.info(
+      {
+        senderPubkey: this.senderPubkey,
+        recipientPubkey: this.recipientPubkey,
+      },
+      "initialized Nostr DM notification sender",
+    );
 
     const existingProfile = await this.pool.get(
       this.deps.relays,
@@ -218,28 +308,63 @@ export class NostrDmNotificationSender implements NotificationSender {
     }
 
     const plaintext = formatNotificationMessage(input);
+    const senderRelays = dedupeRelays(this.deps.relays);
 
-    // NIP-17: Create gift-wrapped DM from NostrClaw to recipient
-    // (kind 14 rumor → NIP-44 sealed kind 13 → NIP-44 gift-wrapped kind 1059)
-    const giftWrap = nip17.wrapEvent(
+    this.deps.logger.info(
+      {
+        eventId: input.event.id,
+        watchlistId: input.watchlist.id,
+        watchlistName: input.watchlist.name,
+        senderRelayCount: senderRelays.length,
+      },
+      "building NIP-17 DM notification",
+    );
+
+    // Mirror the reference bus/client behavior:
+    // create one wrap addressed to the sender (so other clients for that key can
+    // show the sent message) and one wrap addressed to the recipient.
+    const wrappedCopies = nip17.wrapManyEvents(
       this.senderSecretKey!,
-      { publicKey: this.recipientPubkey },
+      [{ publicKey: this.recipientPubkey }],
       plaintext,
     );
 
-    const recipientDmRelays = await this.getRecipientDmRelays();
-    const targetRelays = [
-      ...new Set([...this.deps.relays, ...recipientDmRelays]),
-    ];
-
-    // Publish to configured relays + recipient DM relays (kind 10050)
-    const publishResult = await this.publishToRelays(targetRelays, giftWrap);
-
-    if (publishResult.successfulRelays.length === 0) {
+    if (wrappedCopies.length < 2) {
       throw new Error(
-        `failed to send NIP-17 DM: no relay accepted the event (${publishResult.failedRelays
+        "failed to create NIP-17 DM copies for sender and recipient",
+      );
+    }
+
+    const [senderCopyWrap, recipientCopyWrap] = wrappedCopies;
+
+    const recipientDmRelays = await this.getRecipientDmRelays();
+    const recipientTargetRelays = dedupeRelays([
+      ...senderRelays,
+      ...recipientDmRelays,
+    ]);
+
+    const [recipientPublishResult, senderPublishResult] = await Promise.all([
+      this.publishToRelays(recipientTargetRelays, recipientCopyWrap),
+      this.publishToRelays(senderRelays, senderCopyWrap),
+    ]);
+
+    if (recipientPublishResult.successfulRelays.length === 0) {
+      throw new Error(
+        `failed to send NIP-17 DM: no relay accepted the recipient copy (${recipientPublishResult.failedRelays
           .map(({ relay, reason }) => `${relay}: ${reason}`)
           .join("; ")})`,
+      );
+    }
+
+    if (senderPublishResult.successfulRelays.length === 0) {
+      this.deps.logger.warn?.(
+        {
+          eventId: input.event.id,
+          watchlistId: input.watchlist.id,
+          recipient: this.recipientPubkey,
+          failedRelays: senderPublishResult.failedRelays,
+        },
+        "published recipient DM copy, but failed to publish sender copy",
       );
     }
 
@@ -248,13 +373,19 @@ export class NostrDmNotificationSender implements NotificationSender {
         eventId: input.event.id,
         watchlistId: input.watchlist.id,
         recipient: this.recipientPubkey,
-        relayCount: targetRelays.length,
-        successfulRelayCount: publishResult.successfulRelays.length,
-        failedRelayCount: publishResult.failedRelayCount,
-        successfulRelays: publishResult.successfulRelays,
-        failedRelays: publishResult.failedRelays,
+        recipientRelayCount: recipientTargetRelays.length,
+        senderRelayCount: senderRelays.length,
+        recipientSuccessfulRelayCount:
+          recipientPublishResult.successfulRelays.length,
+        recipientFailedRelayCount: recipientPublishResult.failedRelayCount,
+        senderSuccessfulRelayCount: senderPublishResult.successfulRelays.length,
+        senderFailedRelayCount: senderPublishResult.failedRelayCount,
+        recipientSuccessfulRelays: recipientPublishResult.successfulRelays,
+        recipientFailedRelays: recipientPublishResult.failedRelays,
+        senderSuccessfulRelays: senderPublishResult.successfulRelays,
+        senderFailedRelays: senderPublishResult.failedRelays,
       },
-      "sent NIP-17 gift-wrapped DM to recipient",
+      "sent NIP-17 gift-wrapped DM copies for recipient and sender",
     );
   }
 }
