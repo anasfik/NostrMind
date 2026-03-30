@@ -1,45 +1,86 @@
 # NostrMind
 
 <p align="center">
-  <img src="docs/screenshots/nostrmind-cover.png" alt="NostrMind" width="100%" />
+  <img src="docs/screenshots/nostrmind-cover.png" alt="NostrMind cover" width="100%" />
 </p>
 
-NostrMind is a config-driven Nostr monitoring worker with AI classification and optional DM alerts.
+**Turn Nostr noise into verified opportunities — automatically.**
 
-It connects to relays, filters events with your watchlists, runs AI evaluation, stores results in SQLite, and exposes a live dashboard.
+NostrMind is a config-driven, AI-powered intelligence worker for Nostr.
+It runs 24/7, filters high-volume relay traffic, scores relevance with your chosen AI stack, stores structured insights in SQLite, and can instantly DM you when a high-value signal appears.
 
-## Highlights
+Built for builders, founders, researchers, and teams that need signal fast.
 
-- JSON-configured runtime (`nostr-mind.config.json`)
-- AI providers: `ollama`, `openai`, `openrouter`, `gemini`
-- Provider failover with `ai.fallbackProviders`
-- Live dashboard with SSE stream on port `3000` by default
-- SQLite-backed processing history and insights
-- NIP-17 DM notifications (when notifier identity + recipient are configured)
+---
+
+## Why NostrMind gets attention
+
+- **Practical ROI**: catches opportunities and trend shifts while you sleep.
+- **Low-friction ops**: one JSON config, one process, one Docker compose.
+- **Local-first economics**: run Ollama locally, fail over to cloud AI only when needed.
+- **Agent-ready API**: query previously validated insights via a bridge endpoint.
+- **Production-minded core**: deduplication, throttled AI queue, persistent history, live dashboard.
+
+---
+
+## Who it is for
+
+- **Founders / GTM teams**: watch for lead intent, product mentions, competitor chatter.
+- **Crypto / market analysts**: monitor specific narratives (e.g. Bitcoin L2s) with strict filtering.
+- **Open-source teams**: track project mentions and community feedback in real time.
+- **AI agent builders**: consume curated signals via `/bridge/query` instead of raw relay firehose.
+- **Nostr power users**: tame the noise and surface only what matters to you.
+
+---
+
+## Core capabilities
+
+- JSON-configured watchlists with keyword, kind, author, tag, since, and limit filters.
+- Multi-provider AI scoring: `ollama`, `openai`, `openrouter`, `gemini`.
+- AI failover chain using `ai.fallbackProviders`.
+- SQLite-backed processed events + insights (fast local retrieval).
+- Live dashboard + server-sent events stream.
+- Optional NIP-17 DM notifications with customizable message templates.
+- Legacy config compatibility (`nostr-claw.config.json`) for smooth migration.
+
+---
+
+## How it works (3-stage signal pipeline)
+
+1. **Relay ingestion**: subscribes to configured Nostr relays.
+2. **Quick filter sieve**: cheap local filtering + processed-event dedup.
+3. **AI intelligence gate**: strict JSON decision (`notify`, `message`, `match_score`, actions).
+
+Only meaningful events become insights. Everything else is dropped early for cost and speed.
 
 ---
 
 ## Quick start
 
-1. Install dependencies:
+### 1) Install
 
 ```bash
 npm install
 ```
 
-2. Create config:
+### 2) Create config
 
 ```bash
 cp nostr-mind.config.json.example nostr-mind.config.json
 ```
 
-3. Edit [nostr-mind.config.json](nostr-mind.config.json):
+### 3) Edit config
 
-- pick AI provider + credentials/model
-- set `notifications.recipientNpub` (optional, for DM alerts)
-- define `watchlists`
+Configure:
 
-4. Run in dev mode:
+- AI provider/model/API keys
+- relays
+- watchlists
+- optional DM recipient (`notifications.recipientNpub`)
+
+Reference: [nostr-mind.config.json.example](nostr-mind.config.json.example)
+
+### 4) Run
 
 ```bash
 npm run dev
@@ -47,7 +88,7 @@ npm run dev
 
 Dashboard: http://localhost:3000
 
-Build + run production:
+Production:
 
 ```bash
 npm run build
@@ -56,16 +97,33 @@ npm start
 
 ---
 
-## AI providers
+## Docker (recommended for 24/7)
 
-| Provider     | Type  | Notes                                           |
-| ------------ | ----- | ----------------------------------------------- |
-| `ollama`     | Local | No cloud API cost; requires local Ollama server |
-| `openai`     | Cloud | Uses OpenAI chat completions                    |
-| `openrouter` | Cloud | OpenRouter OpenAI-compatible endpoint           |
-| `gemini`     | Cloud | Gemini OpenAI-compatible endpoint               |
+```bash
+docker compose up -d --build
+```
 
-Example (local-first with cloud fallback):
+Mounts:
+
+- `./nostr-mind.config.json` → `/app/nostr-mind.config.json` (read-only)
+- `./data` → `/app/data`
+
+Port:
+
+- `3000:3000`
+
+---
+
+## AI provider modes
+
+| Provider     | Mode  | Typical use                       |
+| ------------ | ----- | --------------------------------- |
+| `ollama`     | Local | Private + lowest recurring cost   |
+| `openai`     | Cloud | High-quality classification       |
+| `openrouter` | Cloud | Model routing + flexibility       |
+| `gemini`     | Cloud | Fast, cost-effective cloud option |
+
+Example local-first with cloud fallback:
 
 ```json
 "ai": {
@@ -81,94 +139,67 @@ Example (local-first with cloud fallback):
 
 ---
 
-## Config shape (minimal example)
+## API + dashboard
 
-```json
-{
-  "nodeEnv": "development",
-  "logLevel": "info",
-  "logFilePath": "./data/log.txt",
-  "dbPath": "./data/nostr-mind.sqlite",
-  "nostrRelays": [
-    "wss://relay.damus.io",
-    "wss://relay.primal.net",
-    "wss://nos.lol"
-  ],
-  "ai": {
-    "provider": "ollama",
-    "fallbackProviders": ["openai", "openrouter", "gemini"],
-    "rpm": 20,
-    "ollama": { "baseUrl": "http://localhost:11434", "model": "llama3.2" }
-  },
-  "notifications": {
-    "recipientNpub": "npub1..."
-  },
-  "dashboard": {
-    "enabled": true,
-    "port": 3000,
-    "host": "127.0.0.1"
-  },
-  "watchlists": [
-    {
-      "id": "crypto",
-      "name": "Crypto",
-      "prompt": "Alert me about significant cryptocurrency market events",
-      "active": true,
-      "filters": { "kinds": [1], "limit": 50 }
-    }
-  ]
-}
-```
+When dashboard is enabled, API is served from the same process.
 
-Full reference: [nostr-mind.config.json.example](nostr-mind.config.json.example)
+- `GET /health`
+- `GET /api/stats`
+- `GET /api/watchlists`
+- `POST /api/watchlists`
+- `PATCH /api/watchlists/:id`
+- `DELETE /api/watchlists/:id`
+- `GET /api/insights`
+- `POST /bridge/query` (agent bridge)
+- `GET /api/events/stream` (live SSE)
+
+Legacy compatibility endpoints remain available: `/watchlists`, `/insights`.
 
 ---
 
-## Dashboard
+## DM alerts that feel actionable
 
-When enabled, dashboard is served from the same process:
+When `notifications.recipientNpub` is set, NostrMind can send NIP-17 DMs for AI-approved matches.
 
-> Dashboard is vibe-coded — please drop any issues/nugs (bugs, UX nits, or feature ideas).
+You can customize `watchlist.messageTemplate` using placeholders like:
 
-### Dashboard screenshot
-
-![NostrMind dashboard preview](docs/screenshots/nostrmind-dashboard.png)
-
-Save the provided dashboard screenshot to `docs/screenshots/nostrmind-dashboard.png` to render this preview in GitHub.
-
-- URL: `http://<dashboard.host>:<dashboard.port>`
-- Live event stream: `/api/events/stream`
-- API endpoints include:
-  - `/api/stats`
-  - `/api/watchlists`
-  - `/api/insights`
-
-Legacy endpoints are still available for compatibility (`/watchlists`, `/insights`).
+- `{{watchlist.name}}`
+- `{{ai.message}}`
+- `{{ai.score}}`
+- `{{event.link}}`
+- `{{event.author_link}}`
+- `{{event.content_preview}}`
 
 ---
 
-## Docker
+## Example watchlist ideas
 
-```bash
-docker compose up -d --build
-```
-
-Compose mounts:
-
-- `./nostr-mind.config.json` -> `/app/nostr-mind.config.json` (read-only)
-- `./data` -> `/app/data`
-
-Port mapping:
-
-- `3000:3000` (dashboard/API)
+- "Find posts where teams are actively hiring TypeScript backend developers."
+- "Track strong mentions of my product or brand names."
+- "Alert me to meaningful discussions around Bitcoin L2 scaling narratives."
+- "Detect recurring complaints that reveal product gaps in a niche."
 
 ---
 
-## Notes
+## Reliability notes
 
+- Processed events are tracked per watchlist to avoid duplicate work.
+- Config watchlists are seeded without overwriting dashboard-managed entries.
+- AI throughput is rate-limited with a queue and backpressure handling.
 - Restart after config changes.
-- Config loading prefers `nostr-mind.config.json` and also supports legacy `nostr-claw.config.json`.
-- On startup, watchlists from config are seeded with `INSERT OR IGNORE`:
-  - existing DB watchlists are preserved
-  - dashboard edits are not overwritten by config sync
-- Keep API keys and private keys secret.
+
+---
+
+## Security
+
+- Never commit API keys or private keys.
+- Treat `senderNsec` and provider credentials as secrets.
+- Prefer environment-specific config handling in production.
+
+---
+
+## Project status
+
+NostrMind is actively evolving. Feedback, issues, and PRs are welcome.
+
+If you want a custom deployment or a tailored signal strategy for your team, open an issue with your use case.
