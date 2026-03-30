@@ -4,6 +4,10 @@
   <img src="docs/screenshots/nostrmind-cover.png" alt="NostrMind cover" width="100%" />
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/nostrmind-dashboard.png" alt="NostrMind dashboard preview" width="100%" />
+</p>
+
 **Turn Nostr noise into verified opportunities — automatically.**
 
 NostrMind is a config-driven, AI-powered intelligence worker for Nostr.
