@@ -1,5 +1,9 @@
 # NostrMind
 
+<p align="center">
+  <img src="docs/screenshots/nostrmind-cover.png" alt="NostrMind" width="100%" />
+</p>
+
 NostrMind is a config-driven Nostr monitoring worker with AI classification and optional DM alerts.
 
 It connects to relays, filters events with your watchlists, runs AI evaluation, stores results in SQLite, and exposes a live dashboard.
